@@ -40,7 +40,7 @@ app_license = "mit"
 # webform_include_css = {"doctype": "public/css/doctype.css"}
 
 # include js in page
-# page_js = {"page" : "public/js/file.js"}
+page_js = {"point-of-sale": "public/js/pos_custom.js"}
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
@@ -174,9 +174,9 @@ app_license = "mit"
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "retail_scale.event.get_events"
-# }
+override_whitelisted_methods = {
+	"erpnext.selling.page.point_of_sale.point_of_sale.search_for_serial_or_batch_or_barcode_number": "retail_scale.overrides.barcode_utils.custom_scan_barcode"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -196,7 +196,7 @@ app_license = "mit"
 
 # Request Events
 # ----------------
-# before_request = ["retail_scale.utils.before_request"]
+before_request = ["retail_scale.overrides.barcode_utils.patch_scan_barcode_imports"]
 # after_request = ["retail_scale.utils.after_request"]
 
 # Job Events
