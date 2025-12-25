@@ -1,0 +1,70 @@
+{
+ "autoname": "Prompt",
+ "creation": "2024-12-25 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "password_section",
+  "password",
+  "description_section",
+  "description",
+  "disabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "password_section",
+   "fieldtype": "Section Break",
+   "label": "Password Settings"
+  },
+  {
+   "fieldname": "password",
+   "fieldtype": "Data",
+   "label": "Password",
+   "options": "Password",
+   "reqd": 1
+  },
+  {
+   "fieldname": "description_section",
+   "fieldtype": "Section Break",
+   "label": "Additional Information"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "disabled",
+   "fieldtype": "Check",
+   "label": "Disabled",
+   "default": 0
+  }
+ ],
+ "modified": "2024-12-25 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Retail Scale",
+ "name": "POS Key",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "POS User"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
+

@@ -795,3 +795,187 @@ function patch_pos_cart() {
 	console.log("✅ POS Cart patched for return order indicator");
 }
 
+// Patch POS Controller for password-protected item removal
+(function() {
+	// Wait for the page to be ready
+	$(document).on('page-change', function() {
+		if (frappe.get_route()[0] === 'point-of-sale') {
+			// Use a small delay to ensure POS is fully initialized
+			setTimeout(patch_pos_remove_password, 500);
+		}
+	});
+	
+	// Also try to patch if we're already on the POS page
+	if (frappe.get_route()[0] === 'point-of-sale') {
+		setTimeout(patch_pos_remove_password, 500);
+	}
+})();
+
+function patch_pos_remove_password() {
+	if (!erpnext.PointOfSale || !erpnext.PointOfSale.Controller) {
+		// console.log("⏳ Waiting for POS Controller to load...");
+		setTimeout(patch_pos_remove_password, 100);
+		return;
+	}
+	
+	// Check if already patched
+	if (erpnext.PointOfSale.Controller.prototype._patched_for_remove_password) {
+		return;
+	}
+	
+	// Save original method
+	const original_remove_item = erpnext.PointOfSale.Controller.prototype.remove_item_from_cart;
+	
+	// Function to get removal password from doctype
+	async function get_removal_password() {
+		// Configuration: Change these to match your doctype
+		const DOCTYPE_NAME = "POS Key"; // Change this to your doctype name
+		const PASSWORD_FIELD = "password"; // Change this to your password field name
+		const DEFAULT_PASSWORD = "admin123"; // Fallback if doctype not found
+		
+		// IMPORTANT: The password field should be of type "Data" with password option,
+		// NOT "Password" fieldtype. Password fieldtype stores hashed values that cannot be retrieved.
+		
+		try {
+			// First, get the record name (without password field since it's not allowed in get_list)
+			// Filter to only get active (non-disabled) records
+			const list_result = await frappe.call({
+				method: "frappe.client.get_list",
+				args: {
+					doctype: DOCTYPE_NAME,
+					fields: ["name"], // Only get name field
+					filters: { disabled: 0 }, // Only get active records
+					limit: 1,
+					order_by: "creation desc" // Get the most recent record
+				},
+				async: false,
+			});
+			
+			if (list_result.message && list_result.message.length > 0) {
+				const record_name = list_result.message[0].name;
+				
+				// Now get the password field value using get_value
+				const value_result = await frappe.call({
+					method: "frappe.client.get_value",
+					args: {
+						doctype: DOCTYPE_NAME,
+						filters: { name: record_name },
+						fieldname: PASSWORD_FIELD
+					},
+					async: false,
+				});
+				
+				if (value_result.message && value_result.message[PASSWORD_FIELD]) {
+					return value_result.message[PASSWORD_FIELD];
+				}
+			}
+		} catch (e) {
+			// Doctype might not exist or no records found
+			console.warn("POS Removal Password: Could not fetch from doctype, using default password", e);
+		}
+		
+		// Return default password if doctype fetch fails
+		return DEFAULT_PASSWORD;
+	}
+	
+	// Function to show password prompt dialog
+	function show_password_prompt() {
+		return new Promise((resolve) => {
+			let password_input = "";
+			let dialog = new frappe.ui.Dialog({
+				title: __("Remove Item - Password Required"),
+				fields: [
+					{
+						fieldtype: "HTML",
+						options: `
+							<div style="padding: 10px 0;">
+								<p style="margin-bottom: 15px; color: var(--text-color);">
+									${__("Please enter the password to remove this item from the cart.")}
+								</p>
+							</div>
+						`
+					},
+					{
+						fieldtype: "Password",
+						label: __("Password"),
+						fieldname: "password",
+						reqd: 1,
+						change: function() {
+							password_input = this.value || "";
+						}
+					}
+				],
+				primary_action_label: __("Remove Item"),
+				primary_action: async function() {
+					const correct_password = await get_removal_password();
+					
+					if (password_input === correct_password) {
+						dialog.hide();
+						resolve(true);
+					} else {
+						frappe.show_alert({
+							message: __("Incorrect password. Please try again."),
+							indicator: "red",
+						});
+						frappe.utils.play_sound("error");
+						// Clear password field
+						dialog.fields_dict.password.set_value("");
+						password_input = "";
+						dialog.fields_dict.password.set_focus();
+					}
+				},
+				secondary_action_label: __("Cancel"),
+				secondary_action: function() {
+					dialog.hide();
+					resolve(false);
+				}
+			});
+			
+			dialog.show();
+			// Focus password field when dialog opens
+			setTimeout(() => {
+				if (dialog.fields_dict && dialog.fields_dict.password) {
+					dialog.fields_dict.password.set_focus();
+				}
+			}, 100);
+			
+			// Handle Enter key press to submit
+			dialog.$wrapper.on("keydown", function(e) {
+				if (e.keyCode === 13 && !$(e.target).is("textarea")) {
+					e.preventDefault();
+					dialog.get_primary_btn().click();
+				}
+				// Handle Escape key to cancel
+				if (e.keyCode === 27) {
+					dialog.hide();
+					resolve(false);
+				}
+			});
+			
+			// Clean up event handler when dialog is closed
+			dialog.$wrapper.on("hidden.bs.modal", function() {
+				dialog.$wrapper.off("keydown");
+			});
+		});
+	}
+	
+	// Patch remove_item_from_cart to require password
+	erpnext.PointOfSale.Controller.prototype.remove_item_from_cart = async function() {
+		// Show password prompt
+		const password_correct = await show_password_prompt();
+		
+		if (!password_correct) {
+			// Password incorrect or cancelled, don't remove item
+			return;
+		}
+		
+		// Password correct, proceed with original removal
+		return original_remove_item.call(this);
+	};
+	
+	// Mark as patched
+	erpnext.PointOfSale.Controller.prototype._patched_for_remove_password = true;
+	
+	console.log("✅ POS Controller patched for password-protected item removal");
+}
+
