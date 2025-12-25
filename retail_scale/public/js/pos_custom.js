@@ -260,6 +260,11 @@ function patch_pos_controller() {
 				this.cart.load_invoice();
 			}
 			
+			// Update return indicator
+			if (this.cart && this.cart.update_return_indicator) {
+				this.cart.update_return_indicator();
+			}
+			
 			await this.set_pos_profile_data();
 		}
 		
@@ -662,5 +667,131 @@ function patch_pos_controller() {
 	erpnext.PointOfSale.Controller.prototype._patched_for_return_validation = true;
 	
 	console.log("✅ POS Controller patched for return invoice validation");
+}
+
+// Patch POS Cart to show return order indicator
+(function() {
+	// Wait for the page to be ready
+	$(document).on('page-change', function() {
+		if (frappe.get_route()[0] === 'point-of-sale') {
+			// Use a small delay to ensure POS is fully initialized
+			setTimeout(patch_pos_cart, 500);
+		}
+	});
+	
+	// Also try to patch if we're already on the POS page
+	if (frappe.get_route()[0] === 'point-of-sale') {
+		setTimeout(patch_pos_cart, 500);
+	}
+})();
+
+function patch_pos_cart() {
+	if (!erpnext.PointOfSale || !erpnext.PointOfSale.ItemCart) {
+		// console.log("⏳ Waiting for POS ItemCart to load...");
+		setTimeout(patch_pos_cart, 500);
+		return;
+	}
+	
+	// Check if already patched
+	if (erpnext.PointOfSale.ItemCart.prototype._patched_for_return_indicator) {
+		return;
+	}
+	
+	// Save original method
+	const original_load_invoice = erpnext.PointOfSale.ItemCart.prototype.load_invoice;
+	
+	// Patch load_invoice to show return indicator
+	erpnext.PointOfSale.ItemCart.prototype.load_invoice = function() {
+		const result = original_load_invoice.call(this);
+		this.update_return_indicator();
+		return result;
+	};
+	
+	// Add method to update return indicator
+	erpnext.PointOfSale.ItemCart.prototype.update_return_indicator = function() {
+		const frm = this.events.get_frm();
+		const $cart_label = this.$component.find(".cart-label");
+		const $return_indicator = this.$component.find(".return-order-indicator");
+		
+		// Remove existing indicator if any
+		if ($return_indicator.length) {
+			$return_indicator.remove();
+		}
+		
+		// Inject styles if not already injected
+		if (!$("#return-order-indicator-styles").length) {
+			$("head").append(`
+				<style id="return-order-indicator-styles">
+					.return-order-indicator {
+						background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+						border: 2px solid #f59e0b;
+						border-radius: var(--border-radius-md, 8px);
+						padding: var(--padding-md, 12px);
+						margin-bottom: var(--margin-md, 12px);
+						box-shadow: 0 2px 4px rgba(245, 158, 11, 0.2);
+					}
+					.return-indicator-content {
+						display: flex;
+						align-items: center;
+						gap: var(--margin-md, 12px);
+					}
+					.return-indicator-icon {
+						flex-shrink: 0;
+						color: #d97706;
+						stroke-width: 2.5;
+					}
+					.return-indicator-text {
+						display: flex;
+						flex-direction: column;
+						gap: 4px;
+						flex: 1;
+					}
+					.return-indicator-label {
+						font-weight: 700;
+						font-size: var(--text-md, 14px);
+						color: #92400e;
+						text-transform: uppercase;
+						letter-spacing: 0.5px;
+					}
+					.return-indicator-invoice {
+						font-size: var(--text-sm, 13px);
+						color: #78350f;
+					}
+					.return-indicator-invoice strong {
+						font-weight: 600;
+						color: #92400e;
+					}
+				</style>
+			`);
+		}
+		
+		// Check if this is a return invoice
+		if (frm && frm.doc && frm.doc.is_return && frm.doc.return_against) {
+			// Create return indicator banner
+			const return_indicator_html = `
+				<div class="return-order-indicator">
+					<div class="return-indicator-content">
+						<svg class="return-indicator-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+							<path d="M9 14L4 9L9 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+							<path d="M4 9H20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+							<path d="M20 20V4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+						</svg>
+						<div class="return-indicator-text">
+							<span class="return-indicator-label">${__("Return Order")}</span>
+							<span class="return-indicator-invoice">${__("Original Invoice")}: <strong>${frm.doc.return_against}</strong></span>
+						</div>
+					</div>
+				</div>
+			`;
+			
+			// Insert after cart-label
+			$cart_label.after(return_indicator_html);
+		}
+	};
+	
+	// Mark as patched
+	erpnext.PointOfSale.ItemCart.prototype._patched_for_return_indicator = true;
+	
+	console.log("✅ POS Cart patched for return order indicator");
 }
 
