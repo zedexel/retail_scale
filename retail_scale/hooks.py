@@ -175,7 +175,8 @@ page_js = {"point-of-sale": "public/js/pos_custom.js"}
 # ------------------------------
 #
 override_whitelisted_methods = {
-	"erpnext.selling.page.point_of_sale.point_of_sale.search_for_serial_or_batch_or_barcode_number": "retail_scale.overrides.barcode_utils.custom_scan_barcode"
+	"erpnext.selling.page.point_of_sale.point_of_sale.search_for_serial_or_batch_or_barcode_number": "retail_scale.overrides.barcode_utils.custom_scan_barcode",
+	"erpnext.accounts.doctype.pos_invoice.pos_invoice.get_return_against_items": "retail_scale.overrides.pos_return_utils.get_return_against_items"
 }
 #
 # each overriding function accepts a `data` argument;
