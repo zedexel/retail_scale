@@ -1,91 +1,74 @@
 import frappe
 import os
+from frappe.utils.nestedset import get_descendants_of
 
-# Configure your item group name here
-# Change "Loose" to your actual item group name
-ITEM_GROUP_NAME = "Loose"  # Update this to match your item group name
-
-# Configure PLU export file path
-# Priority: Environment Variable > Site Config > Default
-# For Docker on Windows 11, set environment variable: PLU_EXPORT_PATH=/path/in/container/PLU.txt
-# Or mount a volume and use the mounted path
-def get_plu_export_path():
-    """Get the PLU export file path from config or environment"""
-    # 1. Check environment variable (best for Docker)
-    # Set PLU_EXPORT_PATH=/c/JHMA/PLU.txt or PLU_EXPORT_PATH=/workspace/JHMA/PLU.txt
-    env_path = os.environ.get("PLU_EXPORT_PATH")
-    if env_path:
-        # Ensure it ends with PLU.txt if only directory is provided
-        if env_path.endswith("/"):
-            env_path = os.path.join(env_path, "PLU.txt")
-        elif not env_path.endswith("PLU.txt"):
-            # If path doesn't end with / or PLU.txt, assume it's a directory
-            env_path = os.path.join(env_path, "PLU.txt")
-        return env_path
-    
-    # 2. Check site config (frappe.conf or site_config.json)
+def get_plu_group():
+    """Get the PLU group from Retail Settings singleton doctype"""
     try:
-        site_config = frappe.get_site_config()
-        if site_config.get("plu_export_path"):
-            config_path = site_config.get("plu_export_path")
-            if config_path.endswith("/"):
-                config_path = os.path.join(config_path, "PLU.txt")
-            elif not config_path.endswith("PLU.txt"):
-                config_path = os.path.join(config_path, "PLU.txt")
-            return config_path
-    except:
-        pass
+        retail_settings = frappe.get_single("Retail Settings")
+        return retail_settings.get("plu_group")
+    except Exception as e:
+        frappe.logger().error(f"PLU Export: Error getting plu_group from Retail Settings: {str(e)}")
+        return None
+
+def get_plu_item_groups():
+    """Get the parent group and all its descendant groups"""
+    plu_group = get_plu_group()
+    if not plu_group:
+        return []
     
-    # 3. Default paths (fallback)
-    # For Linux/Ubuntu
-    default_linux = "/home/aadi/Desktop/PLU.txt"
-    # For Docker containers (common mount points)
-    docker_paths = [
-        "/c/JHMA/PLU.txt",  # WSL-style Windows C: drive mount
-        "/workspace/JHMA/PLU.txt",  # Docker workspace mount
-        "/workspace/PLU.txt",  # Common Docker workspace
-        "/home/frappe/PLU.txt",  # Frappe Docker user home
-        "/app/PLU.txt",  # Common app directory
-    ]
+    # Get parent group and all descendants
+    all_groups = [plu_group]
+    try:
+        descendants = get_descendants_of("Item Group", plu_group)
+        all_groups.extend(descendants)
+    except Exception as e:
+        frappe.logger().error(f"PLU Export: Error getting descendants of {plu_group}: {str(e)}")
     
-    # Try to find a writable path
-    for path in docker_paths + [default_linux]:
-        try:
-            # Check if directory exists and is writable
-            dir_path = os.path.dirname(path)
-            if os.path.exists(dir_path) and os.access(dir_path, os.W_OK):
-                return path
-        except:
-            continue
-    
-    # Final fallback
-    return default_linux
+    return all_groups
+
+def get_plu_export_path():
+    """Get the PLU export file path - fixed location in site's public folder"""
+    return frappe.get_site_path("public", "PLU.txt")
 
 def export_to_jhma(doc, method=None):
     try:
         # Debug logging
         frappe.logger().info(f"PLU Export: Hook triggered for {doc.doctype} - {doc.name}")
         
-        # Check if this is an Item Price update - if so, verify the item belongs to the configured group
-        if doc.doctype == "Item Price":
-            item_group = frappe.db.get_value("Item", doc.item_code, "item_group")
-            frappe.logger().info(f"PLU Export: Item {doc.item_code} belongs to group '{item_group}', looking for '{ITEM_GROUP_NAME}'")
-            if item_group != ITEM_GROUP_NAME:
-                frappe.logger().info(f"PLU Export: Skipping - item group mismatch")
-                return  # Skip if item doesn't belong to the configured group
+        # Get the PLU group and all its descendants
+        plu_item_groups = get_plu_item_groups()
+        if not plu_item_groups:
+            frappe.logger().info(f"PLU Export: Skipping - no plu_group configured in Retail Settings")
+            return
         
-        # For Item doctype, check if it belongs to the configured group
+        # Check if this is an Item Price update
+        if doc.doctype == "Item Price":
+            # Check if it's for "Standard Selling" price list
+            if doc.price_list != "Standard Selling":
+                frappe.logger().info(f"PLU Export: Skipping - price list '{doc.price_list}' is not 'Standard Selling'")
+                return
+            
+            # Check if the item belongs to the PLU group or any of its descendants
+            item_group = frappe.db.get_value("Item", doc.item_code, "item_group")
+            frappe.logger().info(f"PLU Export: Item {doc.item_code} belongs to group '{item_group}'")
+            if item_group not in plu_item_groups:
+                frappe.logger().info(f"PLU Export: Skipping - item group '{item_group}' not in PLU groups")
+                return
+        
+        # For Item doctype, check if it belongs to the PLU group or any of its descendants
         elif doc.doctype == "Item":
-            frappe.logger().info(f"PLU Export: Item {doc.name} belongs to group '{doc.item_group}', looking for '{ITEM_GROUP_NAME}'")
-            if doc.item_group != ITEM_GROUP_NAME:
-                frappe.logger().info(f"PLU Export: Skipping - item group mismatch")
-                return  # Skip if not in the configured group
+            frappe.logger().info(f"PLU Export: Item {doc.name} belongs to group '{doc.item_group}'")
+            if doc.item_group not in plu_item_groups:
+                frappe.logger().info(f"PLU Export: Skipping - item group '{doc.item_group}' not in PLU groups")
+                return
         else:
             frappe.logger().info(f"PLU Export: Skipping - wrong doctype: {doc.doctype}")
             return  # Skip for other doctypes
         
-        # Export all items from the configured group
-        frappe.logger().info(f"PLU Export: Starting export for group '{ITEM_GROUP_NAME}'")
+        # Export all items from the PLU group and its descendants
+        plu_group = get_plu_group()
+        frappe.logger().info(f"PLU Export: Starting export for group '{plu_group}' and its descendants")
         export_loose_items_to_plu()
         frappe.logger().info(f"PLU Export: Export completed successfully")
     except Exception as e:
@@ -93,32 +76,45 @@ def export_to_jhma(doc, method=None):
         frappe.logger().error(f"PLU Export Hook Error: {str(e)}")
 
 def export_loose_items_to_plu():
-    """Export all items from the configured item group to PLU.txt file"""
+    """Export all items from the PLU group and its descendants to PLU.txt file"""
     try:
-        # Fetch all items from the configured group
-        items = frappe.get_all("Item", 
-            fields=["item_code", "item_name", "standard_rate"],
-            filters={"item_group": ITEM_GROUP_NAME, "disabled": 0},
-            order_by="creation asc") # Keeps the list order consistent
+        # Get the PLU group and all its descendants
+        plu_item_groups = get_plu_item_groups()
+        if not plu_item_groups:
+            frappe.logger().warning(f"PLU Export: No PLU group configured in Retail Settings")
+            return
         
-        frappe.logger().info(f"PLU Export: Found {len(items)} items in group '{ITEM_GROUP_NAME}'")
+        # Fetch all items from the PLU group and its descendants
+        items = frappe.get_all("Item", 
+            fields=["item_code", "item_name", "standard_rate", "custom_plu_code"],
+            filters={"item_group": ["in", plu_item_groups], "disabled": 0},
+            order_by="custom_plu_code asc") # Order by PLU code
+        
+        plu_group = get_plu_group()
+        frappe.logger().info(f"PLU Export: Found {len(items)} items in group '{plu_group}' and its descendants")
         
         if not items:
-            frappe.logger().warning(f"PLU Export: No items found in group '{ITEM_GROUP_NAME}'")
+            frappe.logger().warning(f"PLU Export: No items found in PLU group '{plu_group}' and its descendants")
             return
         
         lines = []
         current_date = frappe.utils.today()
         
-        # Create the lines with a sequential PLU (1, 2, 3...)
-        for index, item in enumerate(items, start=1):
+        # Create the lines using custom_plu_code as PLU
+        for item in items:
+            # Skip items without a PLU code
+            if not item.custom_plu_code:
+                frappe.logger().warning(f"PLU Export: Skipping item {item.item_code} - no custom_plu_code set")
+                continue
+            
             name = item.item_name[:20] if item.item_name else ""
             
-            # Get the latest Item Price for this item (prefer Item Price over standard_rate)
+            # Get the latest Item Price for this item from "Standard Selling" price list
             # Try to get the most recent active Item Price
             # Build filters for valid Item Prices
             price_filters = {
                 "item_code": item.item_code,
+                "price_list": "Standard Selling",
                 "selling": 1,
                 "valid_from": ["<=", current_date]
             }
@@ -144,10 +140,10 @@ def export_loose_items_to_plu():
             
             # FORMAT: PLU,itemcode,name,price,unit
             # Result: 1,00001,Banana,45,0
-            line = f"{index},{item.item_code},{name},{price},0"
+            line = f"{item.custom_plu_code},{item.item_code},{name},{price},0"
             lines.append(line)
         
-        # Get configured file path (supports Docker/Windows)
+        # Get file path in site's public folder
         file_path = get_plu_export_path()
         
         # Ensure directory exists

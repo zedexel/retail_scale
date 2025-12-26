@@ -259,3 +259,4 @@ before_request = ["retail_scale.overrides.barcode_utils.patch_scan_barcode_impor
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+fixtures = [{"dt": "DocType", "filters": [["name", "=", "Retail Settings"]]}]
