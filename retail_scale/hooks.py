@@ -145,6 +145,17 @@ page_js = {"point-of-sale": "public/js/pos_custom.js"}
 # 	}
 # }
 
+doc_events = {
+    "Item": {
+        "on_update": "retail_scale.utils.export_to_jhma",
+        "after_insert": "retail_scale.utils.export_to_jhma"
+    },
+    "Item Price": {
+        "on_update": "retail_scale.utils.export_to_jhma",
+        "after_insert": "retail_scale.utils.export_to_jhma"
+    }
+}
+
 # Scheduled Tasks
 # ---------------
 
