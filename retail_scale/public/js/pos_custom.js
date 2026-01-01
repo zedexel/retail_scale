@@ -966,3 +966,109 @@ function patch_pos_remove_password() {
 	console.log("✅ POS Controller patched for password-protected item removal");
 }
 
+// Patch POS Controller to delay customer requirement until checkout
+(function() {
+	// Wait for the page to be ready
+	$(document).on('page-change', function() {
+		if (frappe.get_route()[0] === 'point-of-sale') {
+			// Use a small delay to ensure POS is fully initialized
+			setTimeout(patch_pos_delayed_customer_check, 500);
+		}
+	});
+	
+	// Also try to patch if we're already on the POS page
+	if (frappe.get_route()[0] === 'point-of-sale') {
+		setTimeout(patch_pos_delayed_customer_check, 500);
+	}
+})();
+
+function patch_pos_delayed_customer_check() {
+	if (!erpnext.PointOfSale || !erpnext.PointOfSale.Controller) {
+		// console.log("⏳ Waiting for POS Controller to load...");
+		setTimeout(patch_pos_delayed_customer_check, 100);
+		return;
+	}
+	
+	// Check if already patched
+	if (erpnext.PointOfSale.Controller.prototype._patched_for_delayed_customer_check) {
+		return;
+	}
+	
+	// Save original methods
+	const original_on_cart_update = erpnext.PointOfSale.Controller.prototype.on_cart_update;
+	const original_save_and_checkout = erpnext.PointOfSale.Controller.prototype.save_and_checkout;
+	
+	// Patch on_cart_update to bypass customer check when adding items
+	erpnext.PointOfSale.Controller.prototype.on_cart_update = async function(args) {
+		console.log("🔍 on_cart_update called", args);
+		// Check if we're adding a new item (not updating existing)
+		const item_row = this.get_item_from_frm(args.item);
+		const item_row_exists = !$.isEmptyObject(item_row);
+		console.log("🔍 item_row_exists:", item_row_exists, "item_row:", item_row);
+		
+		// Only bypass customer check when adding NEW items (not updating existing)
+		const had_customer = !!this.frm.doc.customer;
+		const bypass_customer_check = !item_row_exists && !had_customer;
+		console.log("🔍 had_customer:", had_customer, "bypass_customer_check:", bypass_customer_check);
+		
+		if (bypass_customer_check) {
+			// Temporarily set a dummy customer to bypass the check
+			// This allows items to be added without customer selection
+			this.frm.doc.customer = "__TEMPORARY_BYPASS__";
+			console.log("🔍 Bypassing customer check - temporarily setting customer");
+		}
+		
+		try {
+			// Call original method
+			const result = await original_on_cart_update.call(this, args);
+			
+			// Restore customer field if it was empty
+			if (bypass_customer_check && this.frm.doc.customer === "__TEMPORARY_BYPASS__") {
+				this.frm.doc.customer = "";
+				console.log("🔍 Restored empty customer field after adding item");
+			}
+			
+			return result;
+		} catch (error) {
+			// Restore customer field if it was empty (even on error)
+			if (bypass_customer_check && this.frm.doc.customer === "__TEMPORARY_BYPASS__") {
+				this.frm.doc.customer = "";
+				console.log("🔍 Restored empty customer field after error");
+			}
+			throw error;
+		}
+	};
+	
+	// Patch save_and_checkout to validate customer before proceeding
+	erpnext.PointOfSale.Controller.prototype.save_and_checkout = async function() {
+		console.log("🔍 save_and_checkout called, customer:", this.frm.doc.customer);
+		// Check if customer is selected before proceeding to checkout
+		if (!this.frm.doc.customer) {
+			console.log("🔍 No customer selected - blocking checkout");
+			this.raise_customer_selection_alert();
+			return;
+		}
+		console.log("🔍 Customer selected - proceeding to checkout");
+		
+		// Customer is selected, proceed with original checkout logic
+		if (this.frm.is_dirty()) {
+			let save_error = false;
+			await this.frm.save(null, null, null, () => (save_error = true));
+			// only move to payment section if save is successful
+			!save_error && this.payment.checkout();
+			// show checkout button on error
+			save_error &&
+				setTimeout(() => {
+					this.cart.toggle_checkout_btn(true);
+				}, 300); // wait for save to finish
+		} else {
+			this.payment.checkout();
+		}
+	};
+	
+	// Mark as patched
+	erpnext.PointOfSale.Controller.prototype._patched_for_delayed_customer_check = true;
+	
+	console.log("✅ POS Controller patched for delayed customer requirement");
+}
+
