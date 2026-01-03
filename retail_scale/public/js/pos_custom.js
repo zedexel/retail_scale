@@ -1009,32 +1009,56 @@ function patch_pos_remove_password() {
 	// Save original method
 	const original_remove_item = erpnext.PointOfSale.Controller.prototype.remove_item_from_cart;
 	
-	// Function to validate password via secure API
-	async function validate_removal_password(entered_password) {
+	// Function to get removal password from doctype
+	async function get_removal_password() {
+		// Configuration: Change these to match your doctype
+		const DOCTYPE_NAME = "POS Key"; // Change this to your doctype name
+		const PASSWORD_FIELD = "password"; // Change this to your password field name
+		const DEFAULT_PASSWORD = "admin123"; // Fallback if doctype not found
+		
+		// IMPORTANT: The password field should be of type "Data" with password option,
+		// NOT "Password" fieldtype. Password fieldtype stores hashed values that cannot be retrieved.
+		
 		try {
-			const result = await frappe.call({
-				method: "retail_scale.api.validate_pos_removal_password",
+			// First, get the record name (without password field since it's not allowed in get_list)
+			// Filter to only get active (non-disabled) records
+			const list_result = await frappe.call({
+				method: "frappe.client.get_list",
 				args: {
-					entered_password: entered_password
+					doctype: DOCTYPE_NAME,
+					fields: ["name"], // Only get name field
+					filters: { disabled: 0 }, // Only get active records
+					limit: 1,
+					order_by: "creation desc" // Get the most recent record
 				},
 				async: false,
 			});
 			
-			if (result.message && result.message.success) {
-				return { valid: true, message: result.message.message };
-			} else {
-				return { 
-					valid: false, 
-					message: result.message?.message || __("Password validation failed. Please try again.") 
-				};
+			if (list_result.message && list_result.message.length > 0) {
+				const record_name = list_result.message[0].name;
+				
+				// Now get the password field value using get_value
+				const value_result = await frappe.call({
+					method: "frappe.client.get_value",
+					args: {
+						doctype: DOCTYPE_NAME,
+						filters: { name: record_name },
+						fieldname: PASSWORD_FIELD
+					},
+					async: false,
+				});
+				
+				if (value_result.message && value_result.message[PASSWORD_FIELD]) {
+					return value_result.message[PASSWORD_FIELD];
+				}
 			}
 		} catch (e) {
-			console.error("POS Removal Password: Error validating password", e);
-			return { 
-				valid: false, 
-				message: __("An error occurred while validating password. Please try again.") 
-			};
+			// Doctype might not exist or no records found
+			console.warn("POS Removal Password: Could not fetch from doctype, using default password", e);
 		}
+		
+		// Return default password if doctype fetch fails
+		return DEFAULT_PASSWORD;
 	}
 	
 	// Function to show password prompt dialog
@@ -1066,25 +1090,14 @@ function patch_pos_remove_password() {
 				],
 				primary_action_label: __("Remove Item"),
 				primary_action: async function() {
-					if (!password_input) {
-						frappe.show_alert({
-							message: __("Please enter a password."),
-							indicator: "red",
-						});
-						frappe.utils.play_sound("error");
-						dialog.fields_dict.password.set_focus();
-						return;
-					}
+					const correct_password = await get_removal_password();
 					
-					// Validate password via secure API
-					const validation = await validate_removal_password(password_input);
-					
-					if (validation.valid) {
+					if (password_input === correct_password) {
 						dialog.hide();
 						resolve(true);
 					} else {
 						frappe.show_alert({
-							message: validation.message,
+							message: __("Incorrect password. Please try again."),
 							indicator: "red",
 						});
 						frappe.utils.play_sound("error");
@@ -1180,6 +1193,21 @@ function patch_pos_delayed_customer_check() {
 	// Save original methods
 	const original_on_cart_update = erpnext.PointOfSale.Controller.prototype.on_cart_update;
 	const original_save_and_checkout = erpnext.PointOfSale.Controller.prototype.save_and_checkout;
+	const original_raise_customer_selection_alert = erpnext.PointOfSale.Controller.prototype.raise_customer_selection_alert;
+	
+	// Track bypass state per controller instance
+	const bypass_state = new WeakMap();
+	
+	// Override raise_customer_selection_alert to prevent it when bypassing
+	erpnext.PointOfSale.Controller.prototype.raise_customer_selection_alert = function() {
+		const is_bypassing = bypass_state.get(this);
+		if (is_bypassing) {
+			// Don't show alert when we're bypassing - just return silently
+			return;
+		}
+		// Show original alert
+		return original_raise_customer_selection_alert.call(this);
+	};
 	
 	// Patch on_cart_update to bypass customer check when adding items
 	erpnext.PointOfSale.Controller.prototype.on_cart_update = async function(args) {
@@ -1192,38 +1220,52 @@ function patch_pos_delayed_customer_check() {
 		// Check if we're adding a new item (not updating existing)
 		const item_row = this.get_item_from_frm(args.item);
 		const item_row_exists = !$.isEmptyObject(item_row);
-		console.log("🔍 item_row_exists:", item_row_exists, "item_row:", item_row);
 		
 		// Only bypass customer check when adding NEW items (not updating existing)
 		const had_customer = !!this.frm.doc.customer;
-		const bypass_customer_check = !item_row_exists && !had_customer;
-		console.log("🔍 had_customer:", had_customer, "bypass_customer_check:", bypass_customer_check);
+		const should_bypass = !item_row_exists && !had_customer;
 		
-		if (bypass_customer_check) {
-			// Temporarily set a dummy customer to bypass the check
-			// This allows items to be added without customer selection
-			this.frm.doc.customer = "__TEMPORARY_BYPASS__";
-			console.log("🔍 Bypassing customer check - temporarily setting customer");
-		}
-		
-		try {
-			// Call original method
-			const result = await original_on_cart_update.call(this, args);
+		if (should_bypass) {
+			// Set bypass flag for this instance BEFORE calling original method
+			bypass_state.set(this, true);
 			
-			// Restore customer field if it was empty
-			if (bypass_customer_check && this.frm.doc.customer === "__TEMPORARY_BYPASS__") {
-				this.frm.doc.customer = "";
-				console.log("🔍 Restored empty customer field after adding item");
-			}
+			// Temporarily set customer to a truthy value to bypass the check at line 640
+			const TEMP_MARKER = "__BYPASS__";
+			const original_customer = this.frm.doc.customer || "";
 			
-			return result;
-		} catch (error) {
-			// Restore customer field if it was empty (even on error)
-			if (bypass_customer_check && this.frm.doc.customer === "__TEMPORARY_BYPASS__") {
-				this.frm.doc.customer = "";
-				console.log("🔍 Restored empty customer field after error");
+			// Set customer directly on doc object
+			this.frm.doc.customer = TEMP_MARKER;
+			
+			try {
+				// Call original method - it will see customer is truthy and proceed
+				const result = await original_on_cart_update.call(this, args);
+				
+				// Restore customer field after item is added
+				if (this.frm.doc.customer === TEMP_MARKER || !this.frm.doc.customer) {
+					this.frm.doc.customer = original_customer;
+					// Refresh the field to update UI
+					if (this.frm.refresh_field) {
+						this.frm.refresh_field("customer");
+					}
+				}
+				
+				return result;
+			} catch (error) {
+				// Restore customer field even on error
+				if (this.frm.doc.customer === TEMP_MARKER || !this.frm.doc.customer) {
+					this.frm.doc.customer = original_customer;
+					if (this.frm.refresh_field) {
+						this.frm.refresh_field("customer");
+					}
+				}
+				throw error;
+			} finally {
+				// Always clear bypass flag
+				bypass_state.set(this, false);
 			}
-			throw error;
+		} else {
+			// Customer exists or updating existing item - use original behavior
+			return original_on_cart_update.call(this, args);
 		}
 	};
 	
@@ -1258,5 +1300,340 @@ function patch_pos_delayed_customer_check() {
 	erpnext.PointOfSale.Controller.prototype._patched_for_delayed_customer_check = true;
 	
 	console.log("✅ POS Controller patched for delayed customer requirement");
+}
+
+
+
+// Patch POS Payment for one-tap payment method allocation
+(function() {
+	// Wait for the page to be ready
+	$(document).on('page-change', function() {
+		if (frappe.get_route()[0] === 'point-of-sale') {
+			// Use a small delay to ensure POS is fully initialized
+			setTimeout(patch_pos_payment, 500);
+		}
+	});
+	
+	// Also try to patch if we're already on the POS page
+	if (frappe.get_route()[0] === 'point-of-sale') {
+		setTimeout(patch_pos_payment, 500);
+	}
+})();
+
+function patch_pos_payment() {
+	if (!erpnext.PointOfSale || !erpnext.PointOfSale.Payment) {
+		// console.log("⏳ Waiting for POS Payment to load...");
+		setTimeout(patch_pos_payment, 100);
+		return;
+	}
+	
+	// Check if already patched
+	if (erpnext.PointOfSale.Payment.prototype._patched_for_one_tap_allocation) {
+		return;
+	}
+	
+	// Save original methods
+	const original_bind_events = erpnext.PointOfSale.Payment.prototype.bind_events;
+	const original_render_payment_mode_dom = erpnext.PointOfSale.Payment.prototype.render_payment_mode_dom;
+	const original_render_payment_section = erpnext.PointOfSale.Payment.prototype.render_payment_section;
+	const original_checkout = erpnext.PointOfSale.Payment.prototype.checkout;
+	const original_after_render = erpnext.PointOfSale.Payment.prototype.after_render;
+	
+	// Helper function to check if split bill is enabled
+	function is_split_bill_enabled(payment_instance) {
+		if (!payment_instance.$split_bill_checkbox || !payment_instance.$split_bill_checkbox.length) {
+			return false;
+		}
+		return payment_instance.$split_bill_checkbox.is(':checked');
+	}
+	
+	// Helper function to attach one-tap allocation handler
+	function attach_one_tap_handler(payment_instance) {
+		if (!payment_instance || !payment_instance.$payment_modes || !payment_instance.$payment_modes.length) {
+			return;
+		}
+		
+		const me = payment_instance;
+		
+		// Remove ALL click handlers on .mode-of-payment (including original)
+		// This ensures our handler is the only one
+		me.$payment_modes.off("click", ".mode-of-payment");
+		
+		// Add custom click handler for one-tap allocation
+		// This handler includes all original functionality plus our one-tap logic
+		me.$payment_modes.on("click", ".mode-of-payment", function (e) {
+			
+			const mode_clicked = $(this);
+			// if clicked element doesn't have .mode-of-payment class then return
+			if (!$(e.target).is(mode_clicked)) return;
+
+			const scrollLeft =
+				mode_clicked.offset().left - me.$payment_modes.offset().left + me.$payment_modes.scrollLeft();
+			me.$payment_modes.animate({ scrollLeft });
+
+			const mode = mode_clicked.attr("data-mode");
+			const frm = me.events.get_frm();
+			const doc = frm.doc;
+			
+			// Check if split bill is enabled
+			const split_bill_enabled = is_split_bill_enabled(me);
+			
+			// Get grand_total (use rounded_total if available, otherwise grand_total)
+			const grand_total = cint(frappe.sys_defaults.disable_rounded_total)
+				? doc.grand_total
+				: doc.rounded_total;
+
+			// hide all control fields and shortcuts
+			$(`.mode-of-payment-control`).css("display", "none");
+			$(`.cash-shortcuts`).css("display", "none");
+			me.$payment_modes.find(`.pay-amount`).css("display", "inline");
+			me.$payment_modes.find(`.loyalty-amount-name`).css("display", "none");
+
+			// remove highlight from all mode-of-payments (only if split bill is disabled)
+			if (!split_bill_enabled) {
+				$(".mode-of-payment").removeClass("border-primary");
+			}
+
+			if (mode_clicked.hasClass("border-primary")) {
+				// clicked one is selected then unselect it
+				mode_clicked.removeClass("border-primary");
+				mode_clicked.find(".mode-of-payment-control").css("display", "none");
+				mode_clicked.find(".cash-shortcuts").css("display", "none");
+				me.$payment_modes.find(`.${mode}-amount`).css("display", "inline");
+				me.$payment_modes.find(`.${mode}-name`).css("display", "none");
+				
+				// Update selected_mode if this was the active one
+				if (me.selected_mode === me[`${mode}_control`]) {
+					me.selected_mode = "";
+				}
+				
+				// If split bill is disabled, reset all payment methods to 0 when unselecting
+				if (!split_bill_enabled) {
+					doc.payments.forEach((p) => {
+						if (p.amount > 0) {
+							frappe.model.set_value(p.doctype, p.name, "amount", 0);
+						}
+					});
+				} else {
+					// Split bill enabled - just reset this payment method
+					const unselected_payment = doc.payments.find((p) => {
+						const payment_mode = me.sanitize_mode_of_payment(p.mode_of_payment);
+						return payment_mode === mode;
+					});
+					if (unselected_payment) {
+						frappe.model.set_value(unselected_payment.doctype, unselected_payment.name, "amount", 0);
+					}
+				}
+			} else {
+				// clicked one is not selected then select it
+				mode_clicked.addClass("border-primary");
+				mode_clicked.find(".mode-of-payment-control").css("display", "flex");
+				mode_clicked.find(".cash-shortcuts").css("display", "grid");
+				me.$payment_modes.find(`.${mode}-amount`).css("display", "none");
+				me.$payment_modes.find(`.${mode}-name`).css("display", "inline");
+
+				me.selected_mode = me[`${mode}_control`];
+				
+				// Check if split bill is enabled
+				if (!split_bill_enabled) {
+					// SPLIT BILL DISABLED: ONE-TAP ALLOCATION LOGIC
+					// 1. Reset all other payment methods to 0
+					// 2. Set clicked payment method to grand_total
+					// 3. Update UI immediately
+					
+					// Find the clicked payment method
+					const clicked_payment = doc.payments.find((p) => {
+						const payment_mode = me.sanitize_mode_of_payment(p.mode_of_payment);
+						return payment_mode === mode;
+					});
+					
+					if (clicked_payment) {
+						// Collect all payment methods that need to be reset
+						const payments_to_reset = doc.payments.filter((p) => {
+							return p.name !== clicked_payment.name && p.amount > 0;
+						});
+						
+						// Reset all other payment methods to 0 first (in parallel)
+						const reset_promises = payments_to_reset.map((p) => {
+							return frappe.model.set_value(p.doctype, p.name, "amount", 0);
+						});
+						
+						// Wait for all resets to complete, then set the clicked payment method
+						Promise.all(reset_promises).then(() => {
+							// Set clicked payment method to grand_total
+							return frappe.model.set_value(
+								clicked_payment.doctype,
+								clicked_payment.name,
+								"amount",
+								grand_total
+							);
+						}).then(() => {
+							// Update UI immediately
+							me.update_totals_section();
+							
+							// Update the payment mode display
+							const formatted_currency = format_currency(grand_total, doc.currency);
+							me.$payment_modes.find(`.${mode}-amount`).html(formatted_currency);
+							
+							// Update the control value (without triggering change event to avoid loops)
+							if (me.selected_mode) {
+								// Temporarily disable the onchange to prevent loops
+								const original_onchange = me.selected_mode.df.onchange;
+								me.selected_mode.df.onchange = function() {};
+								me.selected_mode.set_value(grand_total);
+								// Restore onchange after a brief delay
+								setTimeout(() => {
+									me.selected_mode.df.onchange = original_onchange;
+								}, 100);
+							}
+						}).catch((error) => {
+							console.error("Error updating payment method:", error);
+						});
+					} else {
+						// Handle loyalty points payment method (special case)
+						if (mode === "loyalty-amount") {
+							// Reset all other payment methods to 0
+							const reset_promises = doc.payments
+								.filter((p) => p.amount > 0)
+								.map((p) => frappe.model.set_value(p.doctype, p.name, "amount", 0));
+							
+							Promise.all(reset_promises).then(() => {
+								me.selected_mode && me.selected_mode.$input.get(0).focus();
+								me.auto_set_remaining_amount();
+							});
+						} else {
+							// Fallback to original behavior
+							me.selected_mode && me.selected_mode.$input.get(0).focus();
+							me.auto_set_remaining_amount();
+						}
+					}
+				} else {
+					// SPLIT BILL ENABLED: Original behavior (manual entry, multi-select allowed)
+					// Just focus the input field and let user enter amount manually
+					me.selected_mode && me.selected_mode.$input.get(0).focus();
+					me.auto_set_remaining_amount();
+				}
+			}
+		});
+	}
+	
+	// Override bind_events to add custom payment method click handler
+	erpnext.PointOfSale.Payment.prototype.bind_events = function() {
+		// Call original bind_events first
+		original_bind_events.call(this);
+		
+		// Attach our custom handler after a small delay to ensure DOM is ready
+		const me = this;
+		setTimeout(() => {
+			attach_one_tap_handler(me);
+		}, 50);
+	};
+	
+	// Override render_payment_mode_dom to re-attach handler after DOM update
+	erpnext.PointOfSale.Payment.prototype.render_payment_mode_dom = function() {
+		// Call original render_payment_mode_dom first
+		original_render_payment_mode_dom.call(this);
+		
+		// Re-attach our custom handler after DOM is recreated
+		const me = this;
+		setTimeout(() => {
+			attach_one_tap_handler(me);
+		}, 50);
+	};
+	
+	// Override render_payment_section to add split bill checkbox and ensure handler is attached
+	erpnext.PointOfSale.Payment.prototype.render_payment_section = function() {
+		// Call original render_payment_section first
+		original_render_payment_section.call(this);
+		
+		// Add split bill checkbox if not already added
+		const me = this;
+		if (!me.$split_bill_checkbox || !me.$split_bill_checkbox.length) {
+			const split_bill_html = `
+				<div class="split-bill-toggle" style="
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					padding: 8px 12px;
+					margin: 8px 0;
+					background: var(--control-bg, #f8f9fa);
+					border-radius: 6px;
+					cursor: pointer;
+				">
+					<input type="checkbox" id="split-bill-checkbox" style="
+						width: 18px;
+						height: 18px;
+						cursor: pointer;
+					">
+					<label for="split-bill-checkbox" style="
+						cursor: pointer;
+						font-weight: 500;
+						font-size: 13px;
+						color: var(--text-color, #333);
+						margin: 0;
+					">
+						${__("Split Bill")}
+					</label>
+				</div>
+			`;
+			
+			// Insert after payment modes, before fields-numpad-container
+			me.$payment_modes.after(split_bill_html);
+			me.$split_bill_checkbox = me.$component.find("#split-bill-checkbox");
+			
+			// Bind change event to re-attach handler when toggled
+			me.$split_bill_checkbox.on("change", function() {
+				// Re-attach handler to apply new behavior
+				setTimeout(() => {
+					attach_one_tap_handler(me);
+				}, 50);
+			});
+		}
+		
+		// Re-attach our custom handler
+		setTimeout(() => {
+			attach_one_tap_handler(me);
+		}, 100);
+	};
+	
+	// Override checkout to ensure handler is attached
+	erpnext.PointOfSale.Payment.prototype.checkout = function() {
+		// Call original checkout first
+		original_checkout.call(this);
+		
+		// Re-attach our custom handler after checkout
+		const me = this;
+		setTimeout(() => {
+			attach_one_tap_handler(me);
+		}, 150);
+	};
+	
+	// Override after_render to ensure handler is attached
+	erpnext.PointOfSale.Payment.prototype.after_render = function() {
+		// Call original after_render first
+		original_after_render.call(this);
+		
+		// Re-attach our custom handler
+		const me = this;
+		setTimeout(() => {
+			attach_one_tap_handler(me);
+		}, 50);
+	};
+	
+	// Also listen for paid_amount changes to re-attach handler
+	// This is important because render_payment_mode_dom is called when paid_amount changes
+	frappe.ui.form.on("POS Invoice", "paid_amount", (frm) => {
+		// Find the payment instance
+		if (window.cur_pos && window.cur_pos.payment) {
+			setTimeout(() => {
+				attach_one_tap_handler(window.cur_pos.payment);
+			}, 100);
+		}
+	});
+	
+	// Mark as patched
+	erpnext.PointOfSale.Payment.prototype._patched_for_one_tap_allocation = true;
+	
+	console.log("✅ POS Payment patched for one-tap payment method allocation");
 }
 
