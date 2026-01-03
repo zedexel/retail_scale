@@ -1,0 +1,21 @@
+[
+ {
+  "allow_guest": 0,
+  "api_method": null,
+  "cron_format": null,
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Server Script",
+  "doctype_event": "After Submit",
+  "enable_rate_limit": 0,
+  "event_frequency": "All",
+  "modified": "2026-01-03 09:34:03.720789",
+  "module": "Retail Scale",
+  "name": "Update Selling Price",
+  "rate_limit_count": 5,
+  "rate_limit_seconds": 86400,
+  "reference_doctype": "Purchase Invoice",
+  "script": "# Get default selling price list from Selling Settings\nprice_list = frappe.db.get_single_value(\"Selling Settings\", \"selling_price_list\")\nif not price_list:\n    frappe.msgprint(\"No default Selling Price List set in Selling Settings.\")\n\nfor item in doc.items:\n    if not item.custom_selling_list_rate or not item.item_code:\n        continue\n    \n    new_rate = item.custom_selling_list_rate\n    \n    # Find existing Item Price (selling)\n    item_price_name = frappe.db.get_value(\n        \"Item Price\",\n        filters={\n            \"item_code\": item.item_code,\n            \"price_list\": price_list,\n            \"selling\": 1\n        },\n        fieldname=\"name\"\n    )\n    \n    if item_price_name:\n        # Update existing\n        ip = frappe.get_doc(\"Item Price\", item_price_name)\n        ip.price_list_rate = new_rate\n        ip.save(ignore_permissions=True)\n    else:\n        # Create new\n        ip = frappe.get_doc({\n            \"doctype\": \"Item Price\",\n            \"item_code\": item.item_code,\n            \"price_list\": price_list,\n            \"selling\": 1,\n            \"price_list_rate\": new_rate,\n            \"uom\": item.uom or frappe.db.get_value(\"Item\", item.item_code, \"stock_uom\")\n        })\n        ip.insert(ignore_permissions=True)",
+  "script_type": "DocType Event"
+ }
+]
