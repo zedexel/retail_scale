@@ -273,7 +273,7 @@ function patch_pos_controller() {
 	};
 	
 	// Add validation method to Controller prototype
-	erpnext.PointOfSale.Controller.prototype.validate_return_item = function(item, scanned_barcode, scanned_qty) {
+	erpnext.PointOfSale.Controller.prototype.validate_return_item = function(item, scanned_barcode, scanned_qty, skip_cart_check) {
 		// If not a return invoice or no cache, skip validation
 		if (!this.frm.doc.is_return || !this.return_against_items || !this.return_against_items.length) {
 			return { valid: true };
@@ -304,25 +304,36 @@ function patch_pos_controller() {
 			}
 		}
 		
-		// Find matching items: by barcode first (if provided), then by item_code
 		let matching_items = [];
+		let matched_item = null;
+		let batch_matching_items = []; // Items matching by batch_no
 		
+		// Check if barcode lookup found exact match
 		if (scanned_barcode && scanned_barcode.trim() && this.return_against_items_by_barcode[scanned_barcode]) {
-			// Found by barcode
-			matching_items = [this.return_against_items_by_barcode[scanned_barcode]];
-			// console.log("  - Found item by barcode:", scanned_barcode);
+			// Found by barcode - use directly (barcode is unique)
+			const barcode_match = this.return_against_items_by_barcode[scanned_barcode];
+			
+			// For weight-embedded barcodes found by barcode lookup, use directly
+			// For regular barcodes found by barcode lookup, use directly
+			if (is_weight_barcode && extracted_weight !== null) {
+				// Verify quantity matches (safety check)
+				if (extracted_weight === barcode_match.qty) {
+					matched_item = barcode_match;
+				} else {
+					// Barcode found but quantity doesn't match - shouldn't happen but handle gracefully
+					matching_items = [barcode_match];
+				}
+			} else {
+				// Regular barcode match - use directly
+				matched_item = barcode_match;
+			}
 		} else if (this.return_against_items_by_code[item_code]) {
-			// Found by item_code
+			// Found by item_code - need to match further
 			matching_items = this.return_against_items_by_code[item_code];
-			// console.log("  - Found items by item_code:", item_code, "Count:", matching_items.length);
 		}
 		
-		// console.log("  - Matching items by item_code:", matching_items.length);
-		// matching_items.forEach((orig_item, idx) => {
-		// 	console.log(`    [${idx}] Item: ${orig_item.item_code}, Barcode: "${orig_item.barcode}", Qty: ${orig_item.qty}, Batch: "${orig_item.batch_no}", Serial: "${orig_item.serial_no}", Available: ${orig_item.available_qty}`);
-		// });
 		
-		if (matching_items.length === 0) {
+		if (!matched_item && matching_items.length === 0) {
 			return {
 				valid: false,
 				error: __("Item {0} was not in the original invoice {1}", [
@@ -332,37 +343,53 @@ function patch_pos_controller() {
 			};
 		}
 		
-		// Find exact match
-		let matched_item = null;
-		
-		// For weight-embedded barcodes: Match by exact quantity
-		// For regular items: Match by item_code or barcode (already found above)
-		if (is_weight_barcode && extracted_weight !== null) {
-			// console.log("  🔍 Weight-embedded barcode: Matching by exact quantity");
-			
-			for (const orig_item of matching_items) {
-				// For weight-embedded barcodes, match by exact quantity
-				const qty_match = extracted_weight === orig_item.qty; // Exact match, no tolerance
+		// Find exact match if not already found by barcode lookup
+		if (!matched_item && matching_items.length > 0) {
+			// For weight-embedded barcodes: Match by exact quantity
+			// For regular items: Match by item_code or barcode (already found above)
+			if (is_weight_barcode && extracted_weight !== null) {
+				// console.log("  🔍 Weight-embedded barcode: Matching by exact quantity");
 				
-				// console.log(`  Checking match for item ${orig_item.item_code}:`);
-				// console.log(`    - Original qty: ${orig_item.qty}`);
-				// console.log(`    - Extracted weight: ${extracted_weight}`);
-				// console.log(`    - Qty exact match: ${qty_match}`);
-				
-				if (qty_match) {
-					matched_item = orig_item;
-					// console.log("  ✅ Exact match found for weight-embedded barcode!");
-					break;
+				for (const orig_item of matching_items) {
+					// For weight-embedded barcodes, match by exact quantity
+					const qty_match = extracted_weight === orig_item.qty; // Exact match, no tolerance
+					
+					if (qty_match) {
+						matched_item = orig_item;
+						break;
+					}
 				}
-			}
-		} else {
-			// Regular item: Already found by item_code or barcode, use first match
-			if (matching_items.length > 0) {
-				matched_item = matching_items[0];
-				// console.log("  ✅ Match found by item_code or barcode!");
+			} else {
+				if(item.batch_no){
+					batch_matching_items = matching_items.filter(orig_item => 
+						orig_item.batch_no === item.batch_no
+					);
+					if(batch_matching_items.length > 0){
+						matched_item = batch_matching_items[0];
+					} else {
+						return {
+							valid: false,
+							error: __("Batch number {0} does not match any items in the original invoice", [
+								item.batch_no.bold()
+							])
+						};
+					}
+				} else {
+					if (matching_items.length > 0) {
+						matched_item = matching_items[0];
+					}
+				}
 			}
 		}
 		
+		if (!item.batch_no && matched_item.batch_no) {
+			// Item scanned doesn't have batch_no but original does - this is invalid
+			return {
+				valid: false,
+				error: __("Batch number is required for this item")
+			};
+		}
+
 		if (!matched_item) {
 			if (is_weight_barcode) {
 				// console.log("  ❌ No match found for weight-embedded barcode");
@@ -384,38 +411,17 @@ function patch_pos_controller() {
 			}
 		}
 		
-		// Check available quantity limits
-		const return_qty = scanned_qty || (is_weight_barcode && extracted_weight) || item.qty || 0;
-		const available_qty = matched_item.available_qty || 0;
-		
-		if (return_qty > available_qty) {
-			return {
-				valid: false,
-				error: __("Quantity {0} exceeds available return quantity {1}", [
-					return_qty.toFixed(3).bold(),
-					available_qty.toFixed(3).bold()
-				])
-			};
-		}
-		
-		if (available_qty <= 0) {
-			return {
-				valid: false,
-				error: __("This item has already been fully returned")
-			};
-		}
-		
 		// Check batch/serial match if original had them
-		if (matched_item.batch_no && batch_no !== matched_item.batch_no) {
+		if (matched_item.batch_no && item.batch_no !== matched_item.batch_no) {
 			return {
 				valid: false,
 				error: __("Batch number does not match the original invoice item")
 			};
 		}
 		
-		if (matched_item.serial_no && serial_no) {
+		if (matched_item.serial_no && item.serial_no) {
 			const orig_serials = matched_item.serial_no.split('\n').filter(s => s.trim());
-			if (!orig_serials.includes(serial_no)) {
+			if (!orig_serials.includes(item.serial_no)) {
 				return {
 					valid: false,
 					error: __("Serial number does not match the original invoice item")
@@ -423,6 +429,65 @@ function patch_pos_controller() {
 			}
 		}
 		
+		//Quantity validations
+
+		let total_available_qty = 0;
+		if (item.batch_no && batch_matching_items.length > 0) {
+			// Sum available quantities from all items with matching batch_no
+			total_available_qty = batch_matching_items.reduce((sum, orig_item) => {
+				return sum + (orig_item.available_qty || 0);
+			}, 0);
+			console.log(`  📊 Total available quantity for batch ${item.batch_no}: ${total_available_qty} (from ${batch_matching_items.length} items)`);
+		} else {
+			// Single item match
+			total_available_qty = matched_item.available_qty || 0;
+		}
+		
+		const return_qty = scanned_qty || (is_weight_barcode && extracted_weight) || item.qty || 0;
+		
+		// Get quantity already in cart for this item+batch/barcode combination
+		// Skip cart check if this is for an existing item increment (to avoid double-counting)
+		let in_cart_quantity = 0;
+		if (!skip_cart_check) {
+			in_cart_quantity = (this.frm.doc.items || []).find(i => {
+				// Match by item_code
+				if (i.item_code !== item_code) return false;
+				
+				// For weight-embedded barcodes, also check barcode match (same barcode = same weight)
+				if (is_weight_barcode && scanned_barcode) {
+					return i.barcode === scanned_barcode;
+				}
+				
+				// For batch items, check batch_no match
+				if (item.batch_no) {
+					return i.batch_no === item.batch_no;
+				}
+				
+				// For regular items without batch, match by item_code only
+				return true;
+			})?.qty || 0;
+		}
+		
+		const total_return_qty = Math.abs(return_qty) + Math.abs(in_cart_quantity);
+
+		if (total_return_qty > total_available_qty) {
+			return {
+				valid: false,
+				error: __("Quantity {0} exceeds available return quantity {1}", [
+					total_return_qty.toFixed(3).bold(),
+					total_available_qty.toFixed(3).bold()
+				])
+			};
+		}
+		
+		if (total_available_qty <= 0) {
+			return {
+				valid: false,
+				error: __("This item has already been fully returned")
+			};
+		}
+
+
 		return {
 			valid: true,
 			matched_item: matched_item
@@ -466,6 +531,89 @@ function patch_pos_controller() {
 			
 			const item_row = this.get_item_from_frm(item);
 			const item_row_exists = !$.isEmptyObject(item_row);
+			
+			// Handle existing items in return flow - need to accumulate quantities
+			if (item_row_exists && field === "qty" && item && item.item_code) {
+				console.log(`[Return] Existing item: ${item.item_code}, current_qty: ${item_row.qty}`);
+				// Get barcode from multiple possible sources
+				let scanned_barcode_for_existing = item.barcode || "";
+				
+				// Try to get barcode from item selector's current items
+				if (!scanned_barcode_for_existing && this.item_selector && this.item_selector.items) {
+					const matching_item = this.item_selector.items.find(i => i.item_code === item.item_code);
+					if (matching_item && matching_item.barcode) {
+						scanned_barcode_for_existing = matching_item.barcode;
+					}
+				}
+				
+				// Try to get from search field value if it looks like a barcode
+				if (!scanned_barcode_for_existing && this.item_selector && this.item_selector.search_field) {
+					const search_value = this.item_selector.search_field.get_value();
+					if (search_value && (search_value.length >= 8 || search_value.startsWith("21"))) {
+						scanned_barcode_for_existing = search_value;
+					}
+				}
+				
+				// Check if this is a weight-embedded barcode
+				let is_weight_barcode_existing = false;
+				let extracted_weight_existing = null;
+				if (scanned_barcode_for_existing && scanned_barcode_for_existing.startsWith("21") && scanned_barcode_for_existing.length === 12) {
+					is_weight_barcode_existing = true;
+					try {
+						const weight_str = scanned_barcode_for_existing.substring(7, 12);
+						extracted_weight_existing = parseFloat(weight_str) / 1000;
+					} catch (e) {
+						console.error("Error extracting weight from barcode:", e);
+					}
+				}
+				
+				// Calculate increment amount
+				let increment_amount = -1; // Default for batch items
+				if (is_weight_barcode_existing && extracted_weight_existing !== null) {
+					increment_amount = -Math.abs(extracted_weight_existing);
+				}
+				
+				// Calculate new total quantity
+				const current_qty = item_row.qty || 0;
+				const new_total_qty = current_qty + increment_amount;
+				
+				console.log(`[Return] Increment: ${increment_amount}, new_total: ${new_total_qty}`);
+				
+				// Validate the new total quantity
+				// Pass skip_cart_check=true because scanned_qty_for_validation is already the new total
+				// and we don't want to add the current cart quantity again
+				let scanned_qty_for_validation = Math.abs(new_total_qty);
+				if (is_weight_barcode_existing && extracted_weight_existing !== null) {
+					scanned_qty_for_validation = extracted_weight_existing;
+				}
+				
+				const validation = this.validate_return_item(item, scanned_barcode_for_existing, scanned_qty_for_validation, true);
+				
+				if (!validation.valid) {
+					console.log(`[Return] Validation failed: ${validation.error}`);
+					frappe.dom.unfreeze();
+					frappe.show_alert({
+						message: validation.error,
+						indicator: "red",
+					});
+					frappe.utils.play_sound("error");
+					return;
+				}
+				
+				// For return flow, we need to make from_selector true so original method updates
+				// Set value to "+1" so from_selector becomes true, then we'll adjust after original method
+				// Store the increment amount so we can apply it correctly
+				args.value = "+1";
+				args._return_increment_amount = increment_amount; // Store increment (-1 or -weight)
+				args._return_increment_mode = true; // Flag to indicate this is an increment operation
+				args._expected_new_qty = new_total_qty; // Store expected new quantity for validation
+				console.log(`[Return] Validation passed, setting expected_qty: ${new_total_qty}`);
+				
+				// Store barcode if available
+				if (scanned_barcode_for_existing) {
+					args._scanned_barcode = scanned_barcode_for_existing;
+				}
+			}
 			
 			// Only validate when adding new items (not updating existing ones)
 			if (!item_row_exists && item && item.item_code) {
@@ -568,12 +716,47 @@ function patch_pos_controller() {
 		// Call original method
 		const result = await original_on_cart_update.call(this, args);
 		
+		// Handle return increment mode - original method added +1, we need -1
+		if (this.frm.doc.is_return && result && args._return_increment_mode && args._expected_new_qty !== undefined) {
+			const added_item_row = result;
+			const before_qty = added_item_row.qty || 0;
+			try {
+				// Original method calculated: value = current_qty + 1
+				// But we want: current_qty - 1
+				// So we need to set it to the expected new quantity
+				await frappe.model.set_value(added_item_row.doctype, added_item_row.name, "qty", args._expected_new_qty);
+				added_item_row.qty = args._expected_new_qty;
+				console.log(`[Return] Corrected qty: ${before_qty} → ${args._expected_new_qty}`);
+				// Update cart to reflect the change
+				if (this.update_cart_html) {
+					this.update_cart_html(added_item_row);
+				}
+			} catch (e) {
+				console.error("Error correcting return increment quantity:", e);
+			}
+		}
+		
 		// After item is added, ensure quantity is negative and barcode is stored
 		if (this.frm.doc.is_return && result) {
 			const { item, field } = args;
 			if (item && item.item_code && result) {
 				// result should be the item_row that was added
 				const added_item_row = result;
+				
+				// Skip quantity correction if we already handled it in increment mode
+				if (args._return_increment_mode) {
+					// Quantity already corrected above, just ensure barcode is stored
+					const barcode_to_store = args._scanned_barcode || "";
+					if (barcode_to_store && !added_item_row.barcode) {
+						try {
+							await frappe.model.set_value(added_item_row.doctype, added_item_row.name, "barcode", barcode_to_store);
+							added_item_row.barcode = barcode_to_store;
+						} catch (e) {
+							console.error("Error setting barcode:", e);
+						}
+					}
+					return result;
+				}
 				
 				// Get stored values from args
 				const stored_extracted_weight = args._extracted_weight;
@@ -1000,6 +1183,11 @@ function patch_pos_delayed_customer_check() {
 	
 	// Patch on_cart_update to bypass customer check when adding items
 	erpnext.PointOfSale.Controller.prototype.on_cart_update = async function(args) {
+		// Skip override for return item flow checkout - use original behavior
+		if (this.frm.doc.is_return) {
+			return await original_on_cart_update.call(this, args);
+		}
+		
 		console.log("🔍 on_cart_update called", args);
 		// Check if we're adding a new item (not updating existing)
 		const item_row = this.get_item_from_frm(args.item);
