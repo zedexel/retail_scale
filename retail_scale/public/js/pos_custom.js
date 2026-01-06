@@ -1303,6 +1303,14 @@ function patch_pos_payment() {
 		return payment_instance.$split_bill_checkbox.is(':checked');
 	}
 	
+	// Helper function to check if home delivery is enabled
+	function is_home_delivery_enabled(payment_instance) {
+		if (!payment_instance.$home_delivery_checkbox || !payment_instance.$home_delivery_checkbox.length) {
+			return false;
+		}
+		return payment_instance.$home_delivery_checkbox.is(':checked');
+	}
+	
 	// Helper function to attach one-tap allocation handler
 	function attach_one_tap_handler(payment_instance) {
 		if (!payment_instance || !payment_instance.$payment_modes || !payment_instance.$payment_modes.length) {
@@ -1546,6 +1554,66 @@ function patch_pos_payment() {
 			});
 		}
 		
+		// Add home delivery checkbox if not already added
+		if (!me.$home_delivery_checkbox || !me.$home_delivery_checkbox.length) {
+			const frm = me.events.get_frm();
+			const home_delivery_html = `
+				<div class="home-delivery-toggle" style="
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					padding: 8px 12px;
+					margin: 8px 0;
+					background: var(--control-bg, #f8f9fa);
+					border-radius: 6px;
+					cursor: pointer;
+				">
+					<input type="checkbox" id="home-delivery-checkbox" style="
+						width: 18px;
+						height: 18px;
+						cursor: pointer;
+					">
+					<label for="home-delivery-checkbox" style="
+						cursor: pointer;
+						font-weight: 500;
+						font-size: 13px;
+						color: var(--text-color, #333);
+						margin: 0;
+					">
+						${__("Home Delivery")}
+					</label>
+				</div>
+			`;
+			
+			// Insert after split bill checkbox
+			if (me.$split_bill_checkbox && me.$split_bill_checkbox.length) {
+				me.$split_bill_checkbox.closest(".split-bill-toggle").after(home_delivery_html);
+			} else {
+				// If split bill checkbox doesn't exist, insert after payment modes
+				me.$payment_modes.after(home_delivery_html);
+			}
+			me.$home_delivery_checkbox = me.$component.find("#home-delivery-checkbox");
+			
+			// Initialize checkbox state from document
+			if (frm && frm.doc && frm.doc.is_home_delivery) {
+				me.$home_delivery_checkbox.prop('checked', true);
+			}
+			
+			// Bind change event to update document field
+			me.$home_delivery_checkbox.on("change", function() {
+				const is_checked = $(this).is(':checked');
+				if (frm && frm.doc) {
+					frappe.model.set_value(frm.doctype, frm.doc.name, "is_home_delivery", is_checked ? 1 : 0);
+				}
+			});
+		} else {
+			// Update checkbox state if it already exists (for existing invoices)
+			const frm = me.events.get_frm();
+			if (frm && frm.doc) {
+				me.$home_delivery_checkbox.prop('checked', !!frm.doc.is_home_delivery);
+			}
+		}
+		
 		// Re-attach our custom handler
 		setTimeout(() => {
 			attach_one_tap_handler(me);
@@ -1569,8 +1637,16 @@ function patch_pos_payment() {
 		// Call original after_render first
 		original_after_render.call(this);
 		
-		// Re-attach our custom handler
+		// Sync home delivery checkbox state
 		const me = this;
+		if (me.$home_delivery_checkbox && me.$home_delivery_checkbox.length) {
+			const frm = me.events.get_frm();
+			if (frm && frm.doc) {
+				me.$home_delivery_checkbox.prop('checked', !!frm.doc.is_home_delivery);
+			}
+		}
+		
+		// Re-attach our custom handler
 		setTimeout(() => {
 			attach_one_tap_handler(me);
 		}, 50);
